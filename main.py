@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 import threading
 import traceback
@@ -18,29 +19,28 @@ log.setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-def run_payload_server():
-    dta = ServerData()
-    store = ModbusSlaveContext(di=dta, co=dta, hr=dta, ir=dta)
-    context = ModbusServerContext(slaves=store, single=True)
 
-    identity = ModbusDeviceIdentification()
-    identity.VendorName = 'Easy Wallbox Adapter'
-    identity.ProductCode = 'EWA'
-    identity.VendorUrl = 'http://github.com/rxhan/ewa/'
-    identity.ProductName = 'Easy Wallbox Adapter'
-    identity.ModelName = 'Easy Wallbox Adapter'
-    identity.MajorMinorRevision = version.short()
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value in (None, ''):
+        return default
+    return int(value)
 
-    def background():
-        StartTcpServer(context, identity=identity, address=("0.0.0.0", 502))
 
-    # now threading1 runs regardless of user input
-    threading1 = threading.Thread(target=background)
-    threading1.daemon = True
-    threading1.start()
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value in (None, ''):
+        return default
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
 
+
+def interactive_console(dta: ServerData):
     while True:
-        i = input('=>')
+        try:
+            i = input('=>')
+        except EOFError:
+            return
+
         if i.lower() == 'exit':
             sys.exit()
 
@@ -92,8 +92,37 @@ def run_payload_server():
                     dta.__setattr__(param, inputvalue)
 
                     print('Param changed from: ' + str(val) + ' to ' + str(inputvalue))
-        except Exception as e:
+        except Exception:
             traceback.print_exc()
+
+
+def run_payload_server():
+    dta = ServerData()
+    store = ModbusSlaveContext(di=dta, co=dta, hr=dta, ir=dta)
+    context = ModbusServerContext(slaves=store, single=True)
+    bind_host = os.getenv('EWA_BIND_HOST', '0.0.0.0')
+    bind_port = env_int('EWA_BIND_PORT', 502)
+    interactive = env_bool('EWA_INTERACTIVE', sys.stdin.isatty())
+
+    identity = ModbusDeviceIdentification()
+    identity.VendorName = 'Easy Wallbox Adapter'
+    identity.ProductCode = 'EWA'
+    identity.VendorUrl = 'http://github.com/rxhan/ewa/'
+    identity.ProductName = 'Easy Wallbox Adapter'
+    identity.ModelName = 'Easy Wallbox Adapter'
+    identity.MajorMinorRevision = version.short()
+
+    def background():
+        StartTcpServer(context, identity=identity, address=(bind_host, bind_port))
+
+    if interactive:
+        threading1 = threading.Thread(target=background, name='modbus-server')
+        threading1.daemon = True
+        threading1.start()
+        interactive_console(dta)
+        return
+
+    background()
 
 
 if __name__ == "__main__":

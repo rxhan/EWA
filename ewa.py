@@ -1,8 +1,14 @@
 import datetime
 import logging
+import os
 
 import requests
 from pymodbus.datastore import ModbusSparseDataBlock
+
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:
+    mqtt = None
 
 FORMAT = ('%(asctime)-15s %(threadName)-15s'
           ' %(levelname)-8s %(module)-15s:%(lineno)-8s %(message)s')
@@ -11,6 +17,24 @@ log = logging.getLogger()
 log.setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def env_str(name: str, default: str) -> str:
+    return os.getenv(name, default)
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value in (None, ''):
+        return default
+    return int(value)
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value in (None, ''):
+        return default
+    return float(value)
 
 class ServerData(ModbusSparseDataBlock):
     def __init__(self):
@@ -22,18 +46,17 @@ class ServerData(ModbusSparseDataBlock):
         self.phases_ampere = (0*10, 0*10, 0*10)          # in A (*10
         self._phases_voltage = (230,230,230)     # in V
 
-        self.phases_measured_url = 'http://192.168.179.65:1880/sensor?datensammler_sdm630.status'
         self.phases_maxampere = (0, 0, 0)       # in A
-        self.phases = 1                         # Anzahl verwendeter Phasen (1 oder 3)
-        self._energietotal = 0                  # in kWh
-        self._energietotal_dt = 0.0
-        self._energieaktuell = 0                # in kWh
-        self._energieaktuell_dt = 0.0
+        self.phases = env_int('EWA_PHASES', 1)  # Anzahl verwendeter Phasen (1 oder 3)
+        self._ladeleistung = 0.0                # in W, aus MQTT
+        self._energietotal = 0.0                # in Wh, aus MQTT
+        self._energieaktuell = 0.0              # in Wh, aus MQTT
+        self._charge_duration = 0               # in s, aus MQTT
         self.maxleistung = 0                    # maximale Leistung in W
-        self.netzfrequenz = 50.0                # in hz
-        self.mac = 'E8D8D1663B5B'               # MAC-Addr
-        self.seriennummer = '00000000001'       # Seriennummer
-        self.ladestrom = 16*10                  # Ladestrom in A
+        self.netzfrequenz = env_float('EWA_NETZFREQUENZ', 50.0)  # in hz
+        self.mac = env_str('EWA_MAC', 'E8D8D1663B5B')            # MAC-Addr
+        self.seriennummer = env_str('EWA_SERIENNUMMER', '00000000001')
+        self.ladestrom = env_int('EWA_LADESTROM', 16 * 10)       # Ladestrom in A*10
         self._laedt = False                     # Ladevorgang gestartet
         self._ladestart : float = 0.0           # Ladestart gestartet
 
@@ -46,11 +69,11 @@ class ServerData(ModbusSparseDataBlock):
         self.fehlercodes1 = 0b0000000000000000  # Register 107 - Fehlercodes
         self.dipschalter = 0b0000001001         # DIP-Schalter 0b0000001001 = mit Ladekabel (7+10), 0b1111011001 = mit Steckdose
         self.fehlercodes2 = 0b0000000           # Register 155 - Fehlercodes
-        self.ip = '192.168.179.30'              # IP-Adresse
-        self.subnet = '255.255.255.0'           # Mac-Adresse
-        self.ladekabel = 320                    # Stromtragfähigkeit Ladekabel
-        self.maximaler_ladestrom = 320          # Maximaler Ladestrom
-        self.firmware = '1.21'                  # Firmware-Version
+        self.ip = env_str('EWA_IP', '192.168.179.30')            # IP-Adresse
+        self.subnet = env_str('EWA_SUBNET', '255.255.255.0')     # Subnetzmaske
+        self.ladekabel = env_int('EWA_LADEKABEL', 160)           # Ladekabel in A*10
+        self.maximaler_ladestrom = env_int('EWA_MAX_LADESTROM', 160)
+        self.firmware = env_str('EWA_FIRMWARE', '1.21')          # Firmware-Version
 
         self.ocppPricePerKWh = 0                # cent
         self.ocppHeartbeatInterval = 0          # s
@@ -60,6 +83,16 @@ class ServerData(ModbusSparseDataBlock):
         self.ocppTransactionMessageAttempts = 0     # count
         self.ocppMessageRetryInterval = 0           # s
         self._ladestatus = None
+        self.mqtt_host = env_str('EWA_MQTT_HOST', 'mqtt.y1r.nl')
+        self.mqtt_port = env_int('EWA_MQTT_PORT', 1883)
+        self.mqtt_username = env_str('EWA_MQTT_USERNAME', '')
+        self.mqtt_password = env_str('EWA_MQTT_PASSWORD', '')
+        self.mqtt_keepalive = env_int('EWA_MQTT_KEEPALIVE', 60)
+        self.evcc_mqtt_topic = env_str('EWA_EVCC_MQTT_TOPIC', 'evcc')
+        self.evcc_loadpoint_id = env_int('EWA_EVCC_LOADPOINT_ID', 1)
+        self._mqtt_client = None
+        self._mqtt_charge_voltages = False
+        self._mqtt_charge_currents = False
 
         self.setValues(101, self.get_100(), onlyset=True)
         self.setValues(301, self.get_300(), onlyset=True)
@@ -71,6 +104,7 @@ class ServerData(ModbusSparseDataBlock):
         self.setValues(462, self.get_461(), onlyset=True)
         self.setValues(436, self.get_435(), onlyset=True)
         self.setValues(413, self.get_412(), onlyset=True)
+        self.start_mqtt()
 
     def setValues(self, address, values, use_as_default=False, onlyset=False):
         if onlyset == False:
@@ -144,6 +178,8 @@ class ServerData(ModbusSparseDataBlock):
     ladestatus = property(get_ladestatus, set_ladestatus)
 
     def get_ladezeit(self) -> int:
+        if self.laedt == True and self._charge_duration > 0:
+            return self._charge_duration
         if self.laedt == True and self._ladestart is not None:
             return int(round(datetime.datetime.now().timestamp() - self._ladestart,0))
         else:
@@ -160,7 +196,6 @@ class ServerData(ModbusSparseDataBlock):
                 self._ladestart = None
                 self.maxleistung = 0
                 self._energieaktuell = 0
-                self._energieaktuell_dt = 0.0
 
             if self._laedt == False and value == True:
                 self._ladestart = datetime.datetime.now().timestamp()
@@ -175,13 +210,8 @@ class ServerData(ModbusSparseDataBlock):
         self.entriegelt = True
 
     def get_phases_voltage(self) -> tuple:
-        if self.phases_measured_url != '':
-            try:
-                req = requests.get(self.phases_measured_url)
-                data = req.json()['data']
-                self._phases_voltage = (int(data['30001']), int(data['30003']), int(data['30005']))
-            except:
-                pass
+        if self._mqtt_charge_voltages:
+            return self._phases_voltage
 
         return self._phases_voltage
 
@@ -202,52 +232,178 @@ class ServerData(ModbusSparseDataBlock):
     phases_ampere = property(get_phases_ampere, set_phases_ampere)
 
     def get_ladeleistung(self) -> int:
-        if self.laedt:
-            ladeleistung =  int(round(((self.phases_voltage[0] * self.phases_ampere[0]) + \
-                            (self.phases_voltage[1] * self.phases_ampere[1]) + \
-                            (self.phases_voltage[2] * self.phases_ampere[2]))* 0.1,0))
-
-            if ladeleistung > self.maxleistung:
-                self.maxleistung = ladeleistung
-
-            ct = datetime.datetime.now().timestamp()
-            if self._energieaktuell_dt > 0.0:
-                if int(round(ct, 0)) != int(round(self._energieaktuell_dt, 0)):
-                    diff = ct - self._energieaktuell_dt
-
-                    ws = diff * ladeleistung
-
-                    self._energieaktuell += ws
-                    self._energieaktuell_dt = ct
-            else:
-                self._energieaktuell_dt = ct
-
-            if self._energietotal_dt > 0.0:
-                if int(round(ct, 0)) != int(round(self._energietotal_dt, 0)):
-                    diff = ct - self._energietotal_dt
-
-                    ws = diff * ladeleistung
-
-                    self._energietotal += ws
-                    self._energietotal_dt = ct
-            else:
-                self._energietotal_dt = ct
-
-            return ladeleistung
-        else:
-            return 0
+        return int(round(self._ladeleistung, 0))
 
     ladeleistung = property(get_ladeleistung)
 
     def get_energieaktuell(self) -> int:
-        return int(round(((self._energieaktuell / 3600) / 1000),0))
+        return int(round(self._energieaktuell / 1000, 0))
 
     energieaktuell = property(get_energieaktuell)
 
     def get_energietotal(self) -> int:
-        return int(round(((self._energietotal / 3600) / 1000), 0))
+        return int(round(self._energietotal / 1000, 0))
 
     energietotal = property(get_energietotal)
+
+    @property
+    def evcc_loadpoint_topic(self) -> str:
+        return f'{self.evcc_mqtt_topic}/loadpoints/{self.evcc_loadpoint_id}'
+
+    def start_mqtt(self):
+        if mqtt is None:
+            logger.warning('paho-mqtt ist nicht installiert, EVCC MQTT ist deaktiviert')
+            return
+
+        client = mqtt.Client(client_id=f'ewa-{self.seriennummer}')
+        if self.mqtt_username != '':
+            client.username_pw_set(self.mqtt_username, self.mqtt_password)
+
+        client.on_connect = self.on_mqtt_connect
+        client.on_disconnect = self.on_mqtt_disconnect
+        client.on_message = self.on_mqtt_message
+
+        try:
+            client.connect_async(self.mqtt_host, self.mqtt_port, self.mqtt_keepalive)
+            client.loop_start()
+            self._mqtt_client = client
+        except Exception:
+            logger.exception('MQTT Verbindung zu EVCC konnte nicht gestartet werden')
+
+    def on_mqtt_connect(self, client, userdata, flags, rc):
+        if rc != 0:
+            logger.warning('MQTT Verbindung fehlgeschlagen: rc=%s', rc)
+            return
+
+        logger.info('MQTT verbunden, abonniere EVCC Loadpoint %s', self.evcc_loadpoint_id)
+        client.subscribe(f'{self.evcc_loadpoint_topic}/#')
+
+    def on_mqtt_disconnect(self, client, userdata, rc):
+        if rc != 0:
+            logger.warning('MQTT Verbindung getrennt: rc=%s', rc)
+
+    def on_mqtt_message(self, client, userdata, msg):
+        topic = msg.topic
+        payload = msg.payload.decode('utf-8').strip()
+        suffix = topic.removeprefix(f'{self.evcc_loadpoint_topic}/')
+
+        if payload == '':
+            return
+
+        if suffix == 'connected':
+            self.autoangesteckt = self.parse_mqtt_bool(payload)
+            # EVCC hat keinen separaten Lock-Status. Fuer die Simulation wird
+            # "verbunden" als "entriegelt/verfuegbar" verwendet.
+            self.entriegelt = self.autoangesteckt
+            return
+
+        if suffix == 'charging':
+            self.update_laedt_from_mqtt(self.parse_mqtt_bool(payload))
+            return
+
+        if suffix == 'enabled':
+            self.freigegeben = self.parse_mqtt_bool(payload)
+            return
+
+        if suffix == 'offeredCurrent':
+            self.ladestrom = int(round(self.parse_mqtt_float(payload) * 10, 0))
+            return
+
+        if suffix in ('phasesActive', 'activePhases'):
+            phases = int(round(self.parse_mqtt_float(payload), 0))
+            if phases in (1, 3):
+                self.phases = phases
+            elif phases > 1:
+                self.phases = 3
+            return
+
+        if suffix == 'chargeDuration':
+            self._charge_duration = self.parse_charge_duration(payload)
+            return
+
+        if suffix.startswith('chargeCurrents/'):
+            self.update_phase_tuple('ampere', suffix, payload)
+            return
+
+        if suffix.startswith('chargeVoltages/'):
+            self.update_phase_tuple('voltage', suffix, payload)
+            return
+
+        try:
+            value = self.parse_mqtt_float(payload)
+        except ValueError:
+            #logger.warning('MQTT Payload konnte nicht verarbeitet werden: %s=%s', topic, payload)
+            return
+
+        if topic.endswith('/chargePower'):
+            self._ladeleistung = value
+            if value > self.maxleistung:
+                self.maxleistung = int(round(value, 0))
+        elif topic.endswith('/chargedEnergy'):
+            if value < self._energieaktuell:
+                self.maxleistung = int(round(self._ladeleistung, 0))
+            self._energieaktuell = value
+        elif topic.endswith('/chargeTotalImport'):
+            self._energietotal = value
+
+    def parse_mqtt_float(self, value) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        if isinstance(value, str):
+            return float(value)
+
+        raise ValueError(f'Ungueltiger MQTT Wert: {value}')
+
+    def parse_mqtt_bool(self, value) -> bool:
+        if isinstance(value, bool):
+            return value
+
+        if isinstance(value, str):
+            return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
+        raise ValueError(f'Ungueltiger MQTT Bool Wert: {value}')
+
+    def update_laedt_from_mqtt(self, value: bool):
+        if value and self._laedt == False:
+            self._ladestart = datetime.datetime.now().timestamp()
+            self.entriegelt = True
+        elif not value:
+            self._ladestart = None
+            self._charge_duration = 0
+
+        self._laedt = value
+
+    def update_phase_tuple(self, source: str, suffix: str, payload: str):
+        parts = suffix.split('/')
+        if len(parts) != 2:
+            return
+
+        try:
+            index = int(parts[1]) - 1
+        except ValueError:
+            return
+
+        if index not in (0, 1, 2):
+            return
+
+        value = self.parse_mqtt_float(payload)
+        if source == 'ampere':
+            current = list(self._phases_ampere)
+            current[index] = int(round(value * 10, 0))
+            self._phases_ampere = tuple(current)
+            self._mqtt_charge_currents = True
+        elif source == 'voltage':
+            voltages = list(self._phases_voltage)
+            voltages[index] = int(round(value, 0))
+            self._phases_voltage = tuple(voltages)
+            self._mqtt_charge_voltages = True
+
+    def parse_charge_duration(self, value: str) -> int:
+        duration = self.parse_mqtt_float(value)
+        if duration > 10000000:
+            duration = duration / 1000000000.0
+        return int(round(duration, 0))
 
     def get_100(self):
         return [ord(self.ladestatus), #StatusByte bei C  +32
