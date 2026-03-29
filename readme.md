@@ -24,7 +24,7 @@ Wenn dein MQTT-Broker nicht als Container-Service `mqtt` im selben Compose-Proje
 
 ### E3/DC
 
-In E3/DC kann nach erfolgreichem Start im Menü über Wallbox die Wallbox als "Easy Connect Wallbox" hinzugefügt werden.
+In E3/DC kann nach erfolgreichem Start von EWA im Meue über Wallbox die Wallbox als "Easy Connect Wallbox" hinzugefuegt werden.
 
 Falls sich eine andere Wallbox bereits im System befindet und über Modbus erreichbar ist, (Speziell Wallbe) darf aber nicht die Funktion Durchsuchen verwendet werden, sondern nur die Direkteingabe der IP, da sonst E3/DC die eigentliche Wallbox versucht zu verbinden und ggfls. die Einstellungsparameter dieser verändert.
 
