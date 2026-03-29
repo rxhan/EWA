@@ -1,18 +1,36 @@
 # Easy Wallbox Adapter
 
-Der Adapter ist speziell fuer Wallbe ECO 2.0s Wallboxen in Verbindung mit E3/DC Hauskraftwerken gedacht. In den Wallbe-Wallboxen befinden sich keine Verbrauchszaehler. Dieser Adapter simuliert die Wallbox-Kommunikation und stellt Messwerte fuer E3/DC bereit.
+Der Adapter ist speziell EVCC in Verbindung mit E3/DC Hauskraftwerken gedacht. Dieser Adapter simuliert die Wallbox-Kommunikation und stellt die in EVCC verfügbaren Messwerte und Daten fuer E3/DC bereit.
 
 ### Stand der Arbeit
 
-Aktuell arbeitet der Adapter weiter als Simulation einer Wallbox. Die Messwerte fuer Ladeleistung und Energie koennen aber aus EVCC per MQTT uebernommen werden.
+Aktuell arbeitet der Adapter als Simulation einer Wallbox. Die Messwerte fuer Ladeleistung und Energie koennen aus EVCC per MQTT uebernommen werden. Die Topics können aber auch von jedem anderen Programm gefüllt werden.
 
 ### Einrichtung
 
-Repository klonen und die Konfiguration ueber Umgebungsvariablen setzen. Fuer den Direktstart ohne Docker koennen die Defaults in `ewa.py` weiter verwendet werden, sinnvoller ist aber die Steuerung per Env-Variablen.
+Repository klonen und die Konfiguration ueber Umgebungsvariablen setzen. Fuer den Direktstart ohne Docker koennen die Defaults in `ewa.py` weiter verwendet werden, sinnvoller ist aber die Steuerung per Env-Variablen und ein Start per Docker.
+
+### Docker
+
+Es gibt jetzt ein `Dockerfile` und eine `compose.yaml`.
+
+Start mit Docker Compose:
+* `docker compose up --build -d`
+
+Der Modbus-Server ist danach auf Port `502` des Hosts erreichbar. Die Konfiguration erfolgt ueber die Environment-Eintraege in `compose.yaml` oder ueber eine `.env` Datei im Projektverzeichnis.
+Als Vorlage liegt eine `.env.example` bei.
+
+Wenn dein MQTT-Broker nicht als Container-Service `mqtt` im selben Compose-Projekt laeuft, musst du `EWA_MQTT_HOST` anpassen.
+
+### E3/DC
+
+In E3/DC kann nach erfolgreichem Start im Menü über Wallbox die Wallbox als "Easy Connect Wallbox" hinzugefügt werden.
+
+Falls sich eine andere Wallbox bereits im System befindet und über Modbus erreichbar ist, (Speziell Wallbe) darf aber nicht die Funktion Durchsuchen verwendet werden, sondern nur die Direkteingabe der IP, da sonst E3/DC die eigentliche Wallbox versucht zu verbinden und ggfls. die Einstellungsparameter dieser verändert.
 
 ### EVCC per MQTT
 
-`ladeleistung`, `energieaktuell` und `energietotal` werden aus EVCC per MQTT gelesen und nicht mehr lokal aus Spannung und Strom berechnet.
+`ladeleistung`, `energieaktuell` und `energietotal` werden aus EVCC per MQTT gelesen.
 
 Standardmaessig werden folgende EVCC-Topics verwendet:
 * `evcc/loadpoints/1/chargePower` - aktuelle Ladeleistung in W
@@ -37,19 +55,7 @@ Wichtige Umgebungsvariablen:
 * `EWA_BIND_HOST`, `EWA_BIND_PORT`
 * `EWA_MAC`, `EWA_SERIENNUMMER`, `EWA_IP`, `EWA_SUBNET`
 * `EWA_LADESTROM`, `EWA_LADEKABEL`, `EWA_MAX_LADESTROM`
-* `EWA_PHASES`, `EWA_PHASES_MEASURED_URL`
-
-### Docker
-
-Es gibt jetzt ein `Dockerfile` und eine `compose.yaml`.
-
-Start mit Docker Compose:
-* `docker compose up --build -d`
-
-Der Modbus-Server ist danach auf Port `502` des Hosts erreichbar. Die Konfiguration erfolgt ueber die Environment-Eintraege in `compose.yaml` oder ueber eine `.env` Datei im Projektverzeichnis.
-Als Vorlage liegt eine `.env.example` bei.
-
-Wenn dein MQTT-Broker nicht als Container-Service `mqtt` im selben Compose-Projekt laeuft, musst du `EWA_MQTT_HOST` anpassen.
+* `EWA_PHASES`
 
 ### Interaktive Eingabe
 
